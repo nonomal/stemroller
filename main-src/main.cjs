@@ -1,6 +1,11 @@
 const { app, ipcMain, dialog, shell, Menu, BrowserWindow } = require('electron')
-const fs = require('fs/promises')
+const fs = require('fs')
+const fsPromises = require('fs/promises')
+const { execSync } = require('child_process')
 const path = require('path')
+const compareVersions = require('compare-versions')
+const fetch = require('electron-fetch').default
+const xxhash = require('xxhash-wasm')
 const ytSearch = require('yt-search')
 const serve = require('electron-serve')
 const Store = require('electron-store')
@@ -10,11 +15,33 @@ let electronStore = null
 
 const loadURL = serve({ directory: 'renderer-build' })
 
+function handleComputeLocalFileHash(event, path) {
+  return new Promise((resolve, reject) => {
+    xxhash().then((hasher) => {
+      const h64 = hasher.create64()
+      const stream = fs.createReadStream(path)
+      stream.on('error', (err) => reject(err))
+      stream.on('data', (chunk) => h64.update(chunk))
+      stream.on('end', () => resolve(h64.digest().toString(16).padStart(16, 0)))
+    })
+  })
+}
+
 async function handleYouTubeSearch(event, query) {
   return JSON.parse(JSON.stringify(await ytSearch(query)))
 }
 
 async function handleSetProcessQueueItems(event, items) {
+  if (!electronStore.get('warnedProcessingLongTime') && items.length > 0) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Processing may take a while',
+      message:
+        'On some computers, processing songs may take a long time. The app probably has not crashed unless it displays a "Failed" status for any of the songs you have chosen to split. If you\'ve waited longer than an hour and StemRoller still appears stuck, feel free to reach out and report the issue via Discord.',
+    })
+    electronStore.set('warnedProcessingLongTime', true)
+  }
+
   await processQueue.setItems(items)
 }
 
@@ -30,15 +57,15 @@ async function handleDeleteVideoStatusAndPath(event, videoId) {
   return processQueue.deleteVideoStatusAndPath(videoId)
 }
 
-async function handleOpenStemsPath(event, videoId) {
-  const videoPath = processQueue.getVideoPath(videoId)
+async function handleOpenStemsPath(event, video) {
+  const videoPath = processQueue.getVideoPath(video.videoId)
 
   let exists = null
   try {
-    await fs.access(videoPath)
+    await fsPromises.access(videoPath)
     exists = true
   } catch (error) {
-    processQueue.deleteVideoStatusAndPath(videoId)
+    processQueue.deleteVideoStatusAndPath(video.videoId)
     exists = false
   }
 
@@ -46,18 +73,31 @@ async function handleOpenStemsPath(event, videoId) {
     await shell.openPath(videoPath)
     return 'found'
   } else {
-    const response = dialog.showMessageBoxSync(mainWindow, {
-      type: 'warning',
-      buttons: ['Yes', 'No'],
-      title: 'Folder Not Found',
-      message:
-        "The folder containing this song's stems has been moved or deleted. Would you like to split this song again?",
-    })
+    if (video.mediaSource === 'youtube') {
+      const response = dialog.showMessageBoxSync(mainWindow, {
+        type: 'warning',
+        buttons: ['Yes', 'No'],
+        title: 'Folder Not Found',
+        message:
+          "The folder containing this song's stems has been moved or deleted. Would you like to split this song again?",
+      })
 
-    if (response === 0) {
-      return 'split'
-    } else {
+      if (response === 0) {
+        return 'split'
+      } else {
+        return 'not-found'
+      }
+    } else if (video.mediaSource === 'local') {
+      dialog.showMessageBoxSync(mainWindow, {
+        type: 'warning',
+        title: 'Folder Not Found',
+        message:
+          "The folder containing this song's stems has been moved or deleted. If you would like to split this song again, simply select the original local file or drag-and-drop it onto the StemRoller window.",
+      })
+
       return 'not-found'
+    } else {
+      throw new Error(`Invalid mediaSource: ${video.mediaSource}`)
     }
   }
 }
@@ -83,6 +123,70 @@ async function handleDisableDonatePopup() {
   mainWindow.webContents.send('donateUpdate', {
     showDonatePopup: false,
   })
+}
+
+async function handleGetOutputPath() {
+  return processQueue.getOutputPath()
+}
+
+async function handleGetModelName() {
+  return processQueue.getModelName()
+}
+
+async function handleGetLocalFileOutputToContainingDir() {
+  return processQueue.getLocalFileOutputToContainingDir()
+}
+
+async function handleGetPrefixStemFilenameWithSongName() {
+  return processQueue.getPrefixStemFilenameWithSongName()
+}
+
+async function handleGetPreserveOriginalAudio() {
+  return processQueue.getPreserveOriginalAudio()
+}
+
+async function handleBrowseOutputPath() {
+  const response = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select folder to store output stems',
+    properties: ['openDirectory'],
+  })
+  if (response.filePaths.length === 1) {
+    processQueue.setOutputPath(response.filePaths[0])
+    return processQueue.getOutputPath()
+  }
+  return null
+}
+
+async function handleSetModelName(event, name) {
+  return processQueue.setModelName(name)
+}
+
+async function handleSetLocalFileOutputToContainingDir(event, value) {
+  return processQueue.setLocalFileOutputToContainingDir(value)
+}
+
+async function handleSetPrefixStemFilenameWithSongName(event, value) {
+  return processQueue.setPrefixStemFilenameWithSongName(value)
+}
+
+async function handleSetPreserveOriginalAudio(event, value) {
+  return processQueue.setPreserveOriginalAudio(value)
+}
+
+async function handleGetOutputFormat() {
+  return processQueue.getOutputFormat()
+}
+
+async function handleSetOutputFormat(event, outputFormat) {
+  return processQueue.setOutputFormat(outputFormat)
+}
+
+async function handleGetPyTorchBackend() {
+  return processQueue.getPyTorchBackend()
+}
+
+async function handleSetPyTorchBackend(event, backend) {
+  return processQueue.setPyTorchBackend(backend)
 }
 
 let mainWindow = null
@@ -112,6 +216,7 @@ function createWindow() {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
+    checkForUpdates()
   })
 
   mainWindow.on('close', (event) => {
@@ -130,17 +235,77 @@ function createWindow() {
     }
   })
 
-  if (process.env.NODE_ENV === 'dev') {
-    const port = process.env.PORT || 3000
+  if (process.env.STEMROLLER_RUN_FROM_SOURCE) {
+    const port = process.env.PORT || 5173
     mainWindow.loadURL(`http://localhost:${port}`)
   } else {
     loadURL(mainWindow)
   }
 }
 
-function main() {
-  // No await here because we don't want to slow down application launch time waiting to be able to delete folders...
-  processQueue.deleteTmpFolders()
+async function checkForUpdates() {
+  try {
+    const remotePackageReq = await fetch(
+      'https://raw.githubusercontent.com/stemrollerapp/stemroller/main/package.json'
+    )
+    const remotePackageJson = await remotePackageReq.json()
+
+    const versionDifference = compareVersions(remotePackageJson.version, app.getVersion())
+
+    if (versionDifference > 0) {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        buttons: ['Yes', 'No'],
+        title: 'Update available!',
+        message: `An update is available! Would you like to visit the StemRoller website and download it now?\n\nYou are using: ${app.getVersion()}\nUpdated version: ${
+          remotePackageJson.version
+        }.`,
+      })
+
+      if (response === 0) {
+        await shell.openExternal('https://www.stemroller.com')
+      }
+    }
+  } catch (err) {
+    console.error(`Update check failed: ${err}`)
+  }
+}
+
+async function checkForMsvcRuntime() {
+  if (process.platform !== 'win32') {
+    return true
+  }
+
+  try {
+    // Will throw an error if it cannot find the file
+    execSync('where vcruntime140.dll', {
+      shell: 'cmd.exe',
+      stdio: 'pipe',
+      encoding: 'utf-8',
+    })
+
+    return true
+  } catch (err) {
+    const { response } = await dialog.showMessageBox(null, {
+      type: 'warning',
+      buttons: ['Yes', 'No'],
+      title: 'Please install Visual C++ Redistributable',
+      message:
+        'This application requires the Microsoft Visual C++ Redistributable (x64) to be installed on your device. Would you like to download it now? (Please restart StemRoller once you have finished installing the Visual C++ Redistributable package).',
+    })
+
+    if (response === 0) {
+      await shell.openExternal(
+        'https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-microsoft-visual-c-redistributable-version'
+      )
+    }
+
+    return false
+  }
+}
+
+async function main() {
+  await processQueue.deleteTmpFolders()
 
   app.on('second-instance', (event, commandLine, workingDirectory, additionalData) => {
     if (mainWindow) {
@@ -158,12 +323,18 @@ function main() {
     }
   })
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    if (!(await checkForMsvcRuntime())) {
+      app.quit()
+      return
+    }
+
     electronStore = new Store()
     processQueue.setElectronStore(electronStore)
 
     createWindow()
 
+    ipcMain.handle('computeLocalFileHash', handleComputeLocalFileHash)
     ipcMain.handle('youtubeSearch', handleYouTubeSearch)
     ipcMain.handle('setProcessQueueItems', handleSetProcessQueueItems)
     ipcMain.handle('getVideoStatus', handleGetVideoStatus)
@@ -174,6 +345,20 @@ function main() {
     ipcMain.handle('openSource', handleOpenSource)
     ipcMain.handle('openChat', handleOpenChat)
     ipcMain.handle('disableDonatePopup', handleDisableDonatePopup)
+    ipcMain.handle('getOutputPath', handleGetOutputPath)
+    ipcMain.handle('getModelName', handleGetModelName)
+    ipcMain.handle('getLocalFileOutputToContainingDir', handleGetLocalFileOutputToContainingDir)
+    ipcMain.handle('getPrefixStemFilenameWithSongName', handleGetPrefixStemFilenameWithSongName)
+    ipcMain.handle('getPreserveOriginalAudio', handleGetPreserveOriginalAudio)
+    ipcMain.handle('browseOutputPath', handleBrowseOutputPath)
+    ipcMain.handle('setModelName', handleSetModelName)
+    ipcMain.handle('setLocalFileOutputToContainingDir', handleSetLocalFileOutputToContainingDir)
+    ipcMain.handle('setPrefixStemFilenameWithSongName', handleSetPrefixStemFilenameWithSongName)
+    ipcMain.handle('setPreserveOriginalAudio', handleSetPreserveOriginalAudio)
+    ipcMain.handle('getOutputFormat', handleGetOutputFormat)
+    ipcMain.handle('setOutputFormat', handleSetOutputFormat)
+    ipcMain.handle('getPyTorchBackend', handleGetPyTorchBackend)
+    ipcMain.handle('setPyTorchBackend', handleSetPyTorchBackend)
   })
 
   app.on('window-all-closed', async () => {
@@ -186,7 +371,33 @@ function main() {
 app.enableSandbox()
 
 if (process.env.NODE_ENV !== 'dev') {
-  Menu.setApplicationMenu(null)
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        {
+          label: 'StemRoller',
+          submenu: [
+            { label: 'Hide', accelerator: 'CmdOrCtrl+H', role: 'hide' },
+            { label: 'Quit', accelerator: 'CmdOrCtrl+Q', role: 'quit' },
+          ],
+        },
+        {
+          label: 'Edit',
+          submenu: [
+            { label: 'Undo', accelerator: 'CmdOrCtrl+Z', role: 'undo' },
+            { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', role: 'redo' },
+            { type: 'separator' },
+            { label: 'Cut', accelerator: 'CmdOrCtrl+X', role: 'cut' },
+            { label: 'Copy', accelerator: 'CmdOrCtrl+C', role: 'copy' },
+            { label: 'Paste', accelerator: 'CmdOrCtrl+V', role: 'paste' },
+            { label: 'Select All', accelerator: 'CmdOrCtrl+A', role: 'selectAll' },
+          ],
+        },
+      ])
+    )
+  } else {
+    Menu.setApplicationMenu(null)
+  }
 }
 
 if (app.requestSingleInstanceLock()) {

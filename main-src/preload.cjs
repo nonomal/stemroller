@@ -1,5 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
+contextBridge.exposeInMainWorld('computeLocalFileHash', (path) =>
+  ipcRenderer.invoke('computeLocalFileHash', path)
+)
 contextBridge.exposeInMainWorld('youtubeSearch', (query) =>
   ipcRenderer.invoke('youtubeSearch', query)
 )
@@ -18,17 +21,43 @@ contextBridge.exposeInMainWorld('deleteVideoStatusAndPath', (videoId) =>
 contextBridge.exposeInMainWorld('openStemsPath', (videoId) =>
   ipcRenderer.invoke('openStemsPath', videoId)
 )
-contextBridge.exposeInMainWorld('openDonate', () =>
-  ipcRenderer.invoke('openDonate')
-)
-contextBridge.exposeInMainWorld('openSource', () =>
-  ipcRenderer.invoke('openSource')
-)
-contextBridge.exposeInMainWorld('openChat', () =>
-  ipcRenderer.invoke('openChat')
-)
+contextBridge.exposeInMainWorld('openDonate', () => ipcRenderer.invoke('openDonate'))
+contextBridge.exposeInMainWorld('openSource', () => ipcRenderer.invoke('openSource'))
+contextBridge.exposeInMainWorld('openChat', () => ipcRenderer.invoke('openChat'))
 contextBridge.exposeInMainWorld('disableDonatePopup', () =>
   ipcRenderer.invoke('disableDonatePopup')
+)
+contextBridge.exposeInMainWorld('getOutputPath', () => ipcRenderer.invoke('getOutputPath'))
+contextBridge.exposeInMainWorld('getModelName', () => ipcRenderer.invoke('getModelName'))
+contextBridge.exposeInMainWorld('getLocalFileOutputToContainingDir', () =>
+  ipcRenderer.invoke('getLocalFileOutputToContainingDir')
+)
+contextBridge.exposeInMainWorld('getPrefixStemFilenameWithSongName', () =>
+  ipcRenderer.invoke('getPrefixStemFilenameWithSongName')
+)
+contextBridge.exposeInMainWorld('getPreserveOriginalAudio', () =>
+  ipcRenderer.invoke('getPreserveOriginalAudio')
+)
+contextBridge.exposeInMainWorld('browseOutputPath', () => ipcRenderer.invoke('browseOutputPath'))
+contextBridge.exposeInMainWorld('setModelName', (value) =>
+  ipcRenderer.invoke('setModelName', value)
+)
+contextBridge.exposeInMainWorld('setLocalFileOutputToContainingDir', (value) =>
+  ipcRenderer.invoke('setLocalFileOutputToContainingDir', value)
+)
+contextBridge.exposeInMainWorld('setPrefixStemFilenameWithSongName', (value) =>
+  ipcRenderer.invoke('setPrefixStemFilenameWithSongName', value)
+)
+contextBridge.exposeInMainWorld('setPreserveOriginalAudio', (value) =>
+  ipcRenderer.invoke('setPreserveOriginalAudio', value)
+)
+contextBridge.exposeInMainWorld('getOutputFormat', () => ipcRenderer.invoke('getOutputFormat'))
+contextBridge.exposeInMainWorld('setOutputFormat', (outputFormat) =>
+  ipcRenderer.invoke('setOutputFormat', outputFormat)
+)
+contextBridge.exposeInMainWorld('getPyTorchBackend', () => ipcRenderer.invoke('getPyTorchBackend'))
+contextBridge.exposeInMainWorld('setPyTorchBackend', (backend) =>
+  ipcRenderer.invoke('setPyTorchBackend', backend)
 )
 
 let handlers = new Map()
@@ -51,6 +80,7 @@ contextBridge.exposeInMainWorld(
     }
   }
 )
+
 ipcRenderer.on('videoStatusUpdate', (event, message) => {
   if (handlers.has('__global')) {
     for (const handler of handlers.get('__global').values()) {
